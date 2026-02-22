@@ -182,6 +182,54 @@ app.get("/", (req, res) => {
 });
 
 // ===============================
+// Render Service Control
+// ===============================
+const RENDER_API_KEY = process.env.RENDER_API_KEY || "rnd_uq7DTg3YkAw9jVq2ta9BVNzWDHEx";
+const SERVICE_ID = process.env.SERVICE_ID || "srv-d6dgj1a4d50c73apk16g";
+
+app.post("/service/restart", async (req, res) => {
+  try {
+    console.log("🔄 Restarting Render service...");
+    const response = await axios.post(
+      `https://api.render.com/v1/services/${SERVICE_ID}/restart`,
+      {},
+      {
+        headers: {
+          "Authorization": `Bearer ${RENDER_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    console.log("✅ Service restart initiated");
+    res.json({ status: "restart initiated", data: response.data });
+  } catch (error) {
+    console.error("❌ Restart Error:", error.response?.data || error.message);
+    res.status(500).json({ error: error.response?.data || error.message });
+  }
+});
+
+app.post("/service/stop", async (req, res) => {
+  try {
+    console.log("⏹️ Stopping Render service...");
+    const response = await axios.post(
+      `https://api.render.com/v1/services/${SERVICE_ID}/suspend`,
+      {},
+      {
+        headers: {
+          "Authorization": `Bearer ${RENDER_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    console.log("✅ Service stopped");
+    res.json({ status: "service stopped", data: response.data });
+  } catch (error) {
+    console.error("❌ Stop Error:", error.response?.data || error.message);
+    res.status(500).json({ error: error.response?.data || error.message });
+  }
+});
+
+// ===============================
 // TradingView Webhook
 // ===============================
 app.post("/webhook/tradingview", async (req, res) => {
