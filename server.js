@@ -351,7 +351,9 @@ app.post("/webhook/tradingview", async (req, res) => {
 // Upstox OAuth Login
 // ===============================
 app.get("/auth/login", (req, res) => {
-  const authUrl = `https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=${process.env.UPSTOX_CLIENT_ID}&redirect_uri=${process.env.UPSTOX_REDIRECT_URI}`;
+  const returnUrl = req.query.return_url || "http://localhost:3000";
+  const redirectUri = "https://shiv-websocket.onrender.com/auth/callback";
+  const authUrl = `https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=${process.env.UPSTOX_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(returnUrl)}`;
   res.redirect(authUrl);
 });
 
@@ -361,6 +363,8 @@ app.get("/auth/login", (req, res) => {
 app.get("/auth/callback", async (req, res) => {
   try {
     const code = req.query.code;
+    const returnUrl = req.query.state || "http://localhost:3000";
+    const redirectUri = "https://shiv-websocket.onrender.com/auth/callback";
 
     const response = await axios.post(
       "https://api.upstox.com/v2/login/authorization/token",
@@ -369,7 +373,7 @@ app.get("/auth/callback", async (req, res) => {
         code: code,
         client_id: process.env.UPSTOX_CLIENT_ID,
         client_secret: process.env.UPSTOX_CLIENT_SECRET,
-        redirect_uri: process.env.UPSTOX_REDIRECT_URI,
+        redirect_uri: redirectUri,
       }),
       {
         headers: {
@@ -385,7 +389,7 @@ app.get("/auth/callback", async (req, res) => {
     console.log("✅ Access Token Stored");
     console.log("⏳ Token Expiry Set to 23 hours from now");
 
-    res.redirect(`http://localhost:3000?token=${encodeURIComponent(upstoxAccessToken)}`);
+    res.redirect(`${returnUrl}?token=${encodeURIComponent(upstoxAccessToken)}`);
   } catch (error) {
     console.error("Auth Error:", error.response?.data || error.message);
     res.status(500).send("Auth Failed");
