@@ -79,7 +79,7 @@ function getInstrumentToken(symbol) {
 // ===============================
 async function getPositions() {
   try {
-    const response = await axios.get("https://api.upstox.com/v2/portfolio/net-positions", {
+    const response = await axios.get("https://api.upstox.com/v2/portfolio/short-term-positions", {
       headers: {
         Authorization: `Bearer ${upstoxAccessToken}`,
         Accept: "application/json",
