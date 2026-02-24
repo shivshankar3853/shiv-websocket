@@ -596,6 +596,7 @@ async function logWebhookOrder(data, status, reason = null, orderId = null) {
           symbol: data.symbol,
           action: data.action,
           quantity: data.quantity,
+          product: data.product,
           price: data.price || 0,
           status: status,
           reason: reason,
