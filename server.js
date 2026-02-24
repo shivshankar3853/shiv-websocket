@@ -3,6 +3,10 @@ const express = require("express");
 const axios = require("axios");
 const fs = require("fs");
 const cron = require("node-cron");
+const { createClient } = require("@supabase/supabase-js");
+const csv = require("csv-parser");
+const zlib = require("zlib");
+const { finished } = require("stream/promises");
 
 const app = express();
 app.use(express.json());
@@ -10,11 +14,81 @@ app.use(express.json());
 const PORT = process.env.PORT || 5000;
 
 // ===============================
-// Store Upstox Tokens (Memory)
+// Supabase Configuration
+// ===============================
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// ===============================
+// Store Upstox Tokens (Memory + DB)
 // ===============================
 let upstoxAccessToken = null;
 let upstoxRefreshToken = null;
 let tokenExpiryTime = null;
+
+// Helper: Save tokens to Supabase
+async function saveTokensToDB(accessToken, refreshToken) {
+  try {
+    console.log("💾 Saving tokens to Supabase...");
+    
+    // 1. Delete old tokens (as requested: remove old non useable token from db)
+    const { error: deleteError } = await supabase
+      .from("auth_tokens")
+      .delete()
+      .neq("access_token", "dummy"); // Delete all
+
+    if (deleteError) throw deleteError;
+
+    // 2. Insert new tokens
+    const { error: insertError } = await supabase
+      .from("auth_tokens")
+      .insert([
+        { 
+          access_token: accessToken, 
+          refresh_token: refreshToken,
+          updated_at: new Date().toISOString()
+        }
+      ]);
+
+    if (insertError) throw insertError;
+
+    console.log("✅ Tokens saved to Supabase successfully");
+  } catch (error) {
+    console.error("❌ Supabase Save Error:", error.message);
+  }
+}
+
+// Helper: Load tokens from Supabase
+async function loadTokensFromDB() {
+  try {
+    console.log("🔄 Loading tokens from Supabase...");
+    const { data, error } = await supabase
+      .from("auth_tokens")
+      .select("*")
+      .order("updated_at", { ascending: false })
+      .limit(1);
+
+    if (error) throw error;
+
+    if (data && data.length > 0) {
+      upstoxAccessToken = data[0].access_token;
+      upstoxRefreshToken = data[0].refresh_token;
+      // We don't store expiry in DB currently, but Upstox tokens usually last 24h.
+      // We'll set it to 23 hours from now if we just loaded it, 
+      // or we could just rely on the next refresh cycle.
+      tokenExpiryTime = Date.now() + 23 * 60 * 60 * 1000; 
+      console.log("✅ Tokens loaded from Supabase");
+      return true;
+    } else {
+      console.log("⚠️ No tokens found in Supabase");
+      return false;
+    }
+  } catch (error) {
+    console.error("❌ Supabase Load Error:", error.message);
+    return false;
+  }
+}
 
 // ===============================
 // Risk Management & Settings
@@ -31,38 +105,56 @@ const recentSignals = new Map();
 let instrumentMap = {};
 
 // ===============================
-// Load Instrument Master from Local File
+// Load/Sync Instrument Master
 // ===============================
-function loadInstruments() {
-  try {
-    console.log("📥 Loading NSE instruments from local file...");
+async function syncInstruments() {
+  const segments = ["NSE", "NFO", "MCX", "CDS"];
+  console.log("📥 Starting instrument sync for:", segments.join(", "));
 
-    const rawData = fs.readFileSync("./instruments/NSE.json", "utf8");
-    const instruments = JSON.parse(rawData);
+  for (const segment of segments) {
+    try {
+      const url = `https://api.upstox.com/v2/instruments/short_name/${segment}.csv.gz`;
+      console.log(`🌐 Fetching ${segment} instruments...`);
 
-    instruments.forEach((item) => {
-      // Adjust field names if needed
-      const symbol = item.trading_symbol || item.symbol;
-      const token = item.instrument_token || item.instrument_key;
+      const response = await axios({
+        method: "get",
+        url: url,
+        responseType: "stream",
+      });
 
-      if (symbol && token && item.exchange === "NSE") {
-        instrumentMap[symbol] = token;
-      }
-    });
+      const gunzip = zlib.createGunzip();
+      const parser = csv();
 
-    console.log(
-      `✅ Instruments Loaded into Map: ${Object.keys(instrumentMap).length}`
-    );
-  } catch (error) {
-    console.error("❌ Instrument Load Error:", error.message);
+      response.data.pipe(gunzip).pipe(parser);
+
+      parser.on("data", (row) => {
+        // Upstox CSV columns: instrument_key, exchange_token, trading_symbol, etc.
+        const symbol = row.trading_symbol;
+        const key = row.instrument_key;
+        if (symbol && key) {
+          instrumentMap[symbol] = key;
+        }
+      });
+
+      await finished(parser);
+      console.log(`✅ ${segment} sync completed.`);
+    } catch (error) {
+      console.error(`❌ Error syncing ${segment}:`, error.message);
+    }
   }
+
+  console.log(
+    `✨ Total Instruments in Map: ${Object.keys(instrumentMap).length}`
+  );
 }
 
 // ===============================
 // Helper: Get Instrument Token
 // ===============================
 function getInstrumentToken(symbol) {
-  const tradingSymbol = symbol.split(":")[1];
+  // Input could be "NSE:SBIN" or "NFO:NIFTY23OCT19500CE"
+  const parts = symbol.split(":");
+  const tradingSymbol = parts.length > 1 ? parts[1] : parts[0];
 
   const token = instrumentMap[tradingSymbol];
 
@@ -162,6 +254,9 @@ async function ensureValidAccessToken() {
       tokenExpiryTime = Date.now() + 23 * 60 * 60 * 1000;
 
       console.log("✅ Token Refreshed Successfully");
+
+      // Persist refreshed tokens to Supabase
+      await saveTokensToDB(upstoxAccessToken, upstoxRefreshToken);
     } catch (error) {
       console.error(
         "❌ Token Refresh Failed:",
@@ -389,6 +484,9 @@ app.get("/auth/callback", async (req, res) => {
     console.log("✅ Access Token Stored");
     console.log("⏳ Token Expiry Set to 23 hours from now");
 
+    // Persist to Supabase
+    await saveTokensToDB(upstoxAccessToken, upstoxRefreshToken);
+
     res.redirect(`${returnUrl}?token=${encodeURIComponent(upstoxAccessToken)}`);
   } catch (error) {
     console.error("Auth Error:", error.response?.data || error.message);
@@ -418,8 +516,9 @@ function scheduleTokenRefresh() {
 // ===============================
 // Start Server
 // ===============================
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  loadInstruments(); // Load local file at startup
+  await syncInstruments(); // Download & Parse fresh instruments from Upstox
+  await loadTokensFromDB(); // Try loading tokens from Supabase at startup
   scheduleTokenRefresh(); // Start cron job
 });
