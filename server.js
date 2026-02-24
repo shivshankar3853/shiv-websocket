@@ -1,5 +1,6 @@
 require("dotenv").config();
 const express = require("express");
+const cors = require("cors");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
@@ -10,6 +11,7 @@ const zlib = require("zlib");
 const { finished } = require("stream/promises");
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
@@ -386,15 +388,24 @@ app.get("/", (req, res) => {
   res.send("TradingView Webhook Server Running");
 });
 
+app.get("/health", (req, res) => {
+  res.json({ 
+    status: "ok", 
+    service: "backend",
+    timestamp: new Date().toISOString() 
+  });
+});
+
 // ===============================
 // Render Service Control
 // ===============================
 const RENDER_API_KEY = process.env.RENDER_API_KEY || "rnd_uq7DTg3YkAw9jVq2ta9BVNzWDHEx";
 const SERVICE_ID = process.env.SERVICE_ID || "srv-d6dgj1a4d50c73apk16g";
+const FRONTEND_SERVICE_ID = process.env.FRONTEND_SERVICE_ID || "srv-d6eppbjh46gs73e89nk0";
 
 app.post("/service/restart", async (req, res) => {
   try {
-    console.log("🔄 Restarting Render service...");
+    console.log("🔄 Restarting Render service (Backend)...");
     const response = await axios.post(
       `https://api.render.com/v1/services/${SERVICE_ID}/restart`,
       {},
@@ -405,7 +416,28 @@ app.post("/service/restart", async (req, res) => {
         },
       }
     );
-    console.log("✅ Service restart initiated");
+    console.log("✅ Backend Service restart initiated");
+    res.json({ status: "restart initiated", data: response.data });
+  } catch (error) {
+    console.error("❌ Restart Error:", error.response?.data || error.message);
+    res.status(500).json({ error: error.response?.data || error.message });
+  }
+});
+
+app.post("/service/restart-frontend", async (req, res) => {
+  try {
+    console.log("🔄 Restarting Render service (Frontend)...");
+    const response = await axios.post(
+      `https://api.render.com/v1/services/${FRONTEND_SERVICE_ID}/restart`,
+      {},
+      {
+        headers: {
+          "Authorization": `Bearer ${RENDER_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    console.log("✅ Frontend Service restart initiated");
     res.json({ status: "restart initiated", data: response.data });
   } catch (error) {
     console.error("❌ Restart Error:", error.response?.data || error.message);
