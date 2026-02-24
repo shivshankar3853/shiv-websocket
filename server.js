@@ -114,7 +114,8 @@ const recentSignals = new Map();
 // ===============================
 // Instrument Map (Symbol → Token)
 // ===============================
-let instrumentMap = {};
+let instrumentMap = {}; // Keyed by instrument_key for search
+let symbolToInstrumentMap = {}; // Keyed by trading_symbol for fast lookup
 
 // ===============================
 // Load/Sync Instrument Master
@@ -153,9 +154,16 @@ async function syncInstruments() {
       console.log(`📊 Processing ${instruments.length} instruments for ${segment}...`);
 
       instruments.forEach((inst) => {
+        const key = inst.instrument_key;
         const symbol = inst.trading_symbol;
+        if (key) {
+          instrumentMap[key] = inst;
+        }
         if (symbol) {
-          instrumentMap[symbol] = inst;
+          // If multiple segments have the same symbol (e.g., NSE/BSE), prioritize NSE
+          if (!symbolToInstrumentMap[symbol] || inst.exchange === "NSE") {
+            symbolToInstrumentMap[symbol] = inst;
+          }
         }
       });
 
@@ -171,8 +179,14 @@ async function syncInstruments() {
           const content = fs.readFileSync(localPath, "utf8");
           const instruments = JSON.parse(content);
           instruments.forEach((inst) => {
+            const key = inst.instrument_key;
             const symbol = inst.trading_symbol;
-            if (symbol) instrumentMap[symbol] = inst;
+            if (key) instrumentMap[key] = inst;
+            if (symbol) {
+              if (!symbolToInstrumentMap[symbol] || inst.exchange === "NSE") {
+                symbolToInstrumentMap[symbol] = inst;
+              }
+            }
           });
           console.log(`✅ ${segment} loaded from local fallback.`);
         } catch (localErr) {
@@ -195,7 +209,7 @@ function getInstrumentToken(symbol) {
   const parts = symbol.split(":");
   const tradingSymbol = parts.length > 1 ? parts[1] : parts[0];
 
-  const instrument = instrumentMap[tradingSymbol];
+  const instrument = symbolToInstrumentMap[tradingSymbol];
 
   if (!instrument) {
     console.log("❌ Instrument Not Found in Map:", tradingSymbol);
@@ -321,26 +335,46 @@ app.get("/api/search", (req, res) => {
 
   const results = Object.values(instrumentMap)
     .filter((inst) => {
-      const matchesQuery = inst.trading_symbol?.toUpperCase().includes(query) || 
-                          inst.name?.toUpperCase().includes(query);
+      const tradingSymbol = inst.trading_symbol?.toUpperCase() || "";
+      const name = inst.name?.toUpperCase() || "";
+      const matchesQuery = tradingSymbol.includes(query) || name.includes(query);
       
       if (!matchesQuery) return false;
       
       if (type) {
+        const instType = inst.instrument_type?.toUpperCase() || "";
         if (type === 'EQUITY') {
-          return inst.instrument_type === 'EQUITY';
+          return instType === 'EQUITY';
         }
         if (type === 'FUTURE') {
-          return inst.instrument_type === 'FUTSTK' || inst.instrument_type === 'FUTIDX' || inst.instrument_type === 'FUTCUR' || inst.instrument_type === 'FUTCOM';
+          return instType.startsWith('FUT');
         }
         if (type === 'OPTION') {
-          return inst.instrument_type === 'OPTSTK' || inst.instrument_type === 'OPTIDX' || inst.instrument_type === 'OPTCUR' || inst.instrument_type === 'OPTCOM';
+          return instType.startsWith('OPT');
         }
       }
       
       return true;
     })
-    .slice(0, 50); // Limit results
+    .sort((a, b) => {
+      const aSymbol = a.trading_symbol?.toUpperCase() || "";
+      const bSymbol = b.trading_symbol?.toUpperCase() || "";
+      
+      // 1. Exact matches first
+      if (aSymbol === query && bSymbol !== query) return -1;
+      if (bSymbol === query && aSymbol !== query) return 1;
+      
+      // 2. Starts with query first
+      if (aSymbol.startsWith(query) && !bSymbol.startsWith(query)) return -1;
+      if (bSymbol.startsWith(query) && !aSymbol.startsWith(query)) return 1;
+      
+      // 3. Equity first
+      if (a.instrument_type === 'EQUITY' && b.instrument_type !== 'EQUITY') return -1;
+      if (b.instrument_type === 'EQUITY' && a.instrument_type !== 'EQUITY') return 1;
+      
+      return 0;
+    })
+    .slice(0, 50);
 
   res.json(results);
 });
