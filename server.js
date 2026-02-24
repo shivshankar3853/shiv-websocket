@@ -435,6 +435,65 @@ app.post("/service/stop", async (req, res) => {
 });
 
 // ===============================
+// Password Authentication (PIN)
+// ===============================
+app.post("/api/verify-pin", async (req, res) => {
+  const { pin } = req.body;
+  if (!pin) return res.status(400).json({ error: "PIN is required" });
+
+  try {
+    const { data, error } = await supabase
+      .from("shiv_users")
+      .select("user_password")
+      .eq("user_password", pin)
+      .limit(1);
+
+    if (error) throw error;
+
+    if (data && data.length > 0) {
+      res.json({ success: true });
+    } else {
+      res.status(401).json({ success: false, error: "Invalid PIN" });
+    }
+  } catch (err) {
+    console.error("❌ PIN Verification Error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/change-pin", async (req, res) => {
+  const { currentPin, newPin } = req.body;
+  if (!currentPin || !newPin) return res.status(400).json({ error: "Current and new PIN required" });
+
+  try {
+    // 1. Verify current PIN
+    const { data, error: fetchError } = await supabase
+      .from("shiv_users")
+      .select("*")
+      .eq("user_password", currentPin)
+      .limit(1);
+
+    if (fetchError) throw fetchError;
+    if (!data || data.length === 0) {
+      return res.status(401).json({ error: "Invalid current PIN" });
+    }
+
+    // 2. Update to new PIN
+    const { error: updateError } = await supabase
+      .from("shiv_users")
+      .update({ user_password: newPin })
+      .eq("user_password", currentPin);
+
+    if (updateError) throw updateError;
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ PIN Change Error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ===============================
 // TradingView Webhook
 // ===============================
 app.post("/webhook/tradingview", async (req, res) => {
