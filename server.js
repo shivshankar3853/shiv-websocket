@@ -531,16 +531,57 @@ app.post("/api/change-pin", async (req, res) => {
 
 app.get("/api/logs", async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { startDate, endDate, limit = 100 } = req.query;
+    let query = supabase
       .from("tradingview_logs")
       .select("*")
       .order("created_at", { ascending: false })
-      .limit(100);
+      .limit(parseInt(limit));
+
+    if (startDate) {
+      query = query.gte("created_at", startDate);
+    }
+    if (endDate) {
+      query = query.lte("created_at", endDate);
+    }
+
+    const { data, error } = await query;
 
     if (error) throw error;
     res.json(data);
   } catch (err) {
     console.error("❌ Fetch Logs Error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.delete("/api/logs", async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from("tradingview_logs")
+      .delete()
+      .neq("id", "00000000-0000-0000-0000-000000000000"); // Delete all
+
+    if (error) throw error;
+    res.json({ success: true, message: "All logs deleted" });
+  } catch (err) {
+    console.error("❌ Delete All Logs Error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.delete("/api/logs/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { error } = await supabase
+      .from("tradingview_logs")
+      .delete()
+      .eq("id", id);
+
+    if (error) throw error;
+    res.json({ success: true, message: "Log deleted" });
+  } catch (err) {
+    console.error("❌ Delete Log Error:", err.message);
     res.status(500).json({ error: "Internal server error" });
   }
 });
