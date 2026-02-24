@@ -583,8 +583,8 @@ app.post("/webhook/tradingview", async (req, res) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    if (!data.symbol || !data.action || !data.quantity) {
-      return res.status(400).json({ error: "Invalid payload" });
+    if (!data.symbol || !data.action || !data.quantity || !data.product) {
+      return res.status(400).json({ error: "Invalid payload: symbol, action, quantity, and product are required" });
     }
 
     console.log("📩 Webhook Received:", data);
@@ -671,21 +671,11 @@ app.post("/webhook/tradingview", async (req, res) => {
       }
     }
 
-    // Determine Product Type
-    let productType = data.product || "D"; // Default to Delivery
-    
-    // Auto-correct for Futures/Options/Commodities (MCX, NFO, CDS)
-    if (data.symbol.startsWith("MCX:") || data.symbol.startsWith("NFO:") || data.symbol.startsWith("CDS:")) {
-      if (productType === "D" || productType === "DELIVERY") {
-        productType = "NRML";
-      }
-    }
-
     const orderResponse = await axios.post(
       "https://api.upstox.com/v2/order/place",
       {
         quantity: data.quantity,
-        product: productType,
+        product: data.product,
         validity: "DAY",
         price: 0,
         tag: "tv-order",
