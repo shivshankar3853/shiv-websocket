@@ -493,6 +493,33 @@ app.post("/api/change-pin", async (req, res) => {
   }
 });
 
+// Helper: Log Webhook Order to Supabase
+async function logWebhookOrder(data, status, reason = null, orderId = null) {
+  try {
+    const { error } = await supabase
+      .from("tradingview_logs")
+      .insert([
+        {
+          symbol: data.symbol,
+          action: data.action,
+          quantity: data.quantity,
+          price: data.price || 0,
+          status: status,
+          reason: reason,
+          order_id: orderId,
+          payload: data,
+          created_at: new Date().toISOString()
+        }
+      ]);
+
+    if (error) {
+      console.error("❌ Supabase Log Error:", error.message);
+    }
+  } catch (err) {
+    console.error("❌ Log Webhook Error:", err.message);
+  }
+}
+
 // ===============================
 // TradingView Webhook
 // ===============================
@@ -513,6 +540,7 @@ app.post("/webhook/tradingview", async (req, res) => {
     // 1. Prevent Duplicate Signals
     if (isDuplicateSignal(data.symbol, data.action)) {
       console.log(`⚠️ Duplicate signal detected for ${data.symbol} - ${data.action}. Skipping.`);
+      await logWebhookOrder(data, "skipped", "duplicate signal");
       return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
     }
 
@@ -521,11 +549,15 @@ app.post("/webhook/tradingview", async (req, res) => {
 
     if (!(await ensureValidAccessToken())) {
       console.log("❌ No valid access token.");
+      await logWebhookOrder(data, "failed", "no valid access token");
       return;
     }
 
     const instrumentToken = getInstrumentToken(data.symbol);
-    if (!instrumentToken) return;
+    if (!instrumentToken) {
+      await logWebhookOrder(data, "failed", "instrument token not found");
+      return;
+    }
 
     // 2. Position Checking
     const positions = await getPositions();
@@ -535,11 +567,13 @@ app.post("/webhook/tradingview", async (req, res) => {
     if (data.action === "BUY") {
       if (existingPosition && parseInt(existingPosition.quantity) > 0) {
         console.log(`⚠️ Already have a LONG position in ${tradingSymbol}. Skipping.`);
+        await logWebhookOrder(data, "skipped", "already have long position");
         return;
       }
     } else if (data.action === "SELL") {
       if (existingPosition && parseInt(existingPosition.quantity) < 0) {
         console.log(`⚠️ Already have a SHORT position in ${tradingSymbol}. Skipping.`);
+        await logWebhookOrder(data, "skipped", "already have short position");
         return;
       }
     }
@@ -548,11 +582,13 @@ app.post("/webhook/tradingview", async (req, res) => {
     const activePositions = positions.filter(p => parseInt(p.quantity) !== 0);
     if (activePositions.length >= MAX_TOTAL_POSITIONS && !existingPosition) {
        console.log(`⚠️ Max total positions reached (${MAX_TOTAL_POSITIONS}). Skipping.`);
+       await logWebhookOrder(data, "skipped", `max total positions reached (${MAX_TOTAL_POSITIONS})`);
        return;
     }
 
     if (data.quantity > MAX_QUANTITY_PER_TRADE) {
       console.log(`⚠️ Quantity (${data.quantity}) exceeds MAX_QUANTITY_PER_TRADE (${MAX_QUANTITY_PER_TRADE}). Skipping.`);
+      await logWebhookOrder(data, "skipped", `quantity (${data.quantity}) exceeds max limit (${MAX_QUANTITY_PER_TRADE})`);
       return;
     }
 
@@ -560,24 +596,25 @@ app.post("/webhook/tradingview", async (req, res) => {
     const funds = await getFunds();
     if (!funds) {
       console.log("❌ Could not verify funds. Skipping trade for safety.");
+      await logWebhookOrder(data, "failed", "could not verify funds");
       return;
     }
 
     const availableMargin = funds.equity.available_margin;
     console.log(`💰 Available Margin: ${availableMargin}`);
 
-    // Simple capital check: assume price is needed for more accurate check, 
-    // but we can at least check against a hard limit per trade
-    // If TV sends price, we can use it.
-    const price = data.price || 0; // If TV sends price
+    // Simple capital check
+    const price = data.price || 0;
     if (price > 0) {
       const requiredCapital = price * data.quantity;
       if (requiredCapital > MAX_CAPITAL_PER_TRADE) {
         console.log(`⚠️ Trade value (${requiredCapital}) exceeds MAX_CAPITAL_PER_TRADE (${MAX_CAPITAL_PER_TRADE}). Skipping.`);
+        await logWebhookOrder(data, "skipped", `required capital (${requiredCapital}) exceeds max limit (${MAX_CAPITAL_PER_TRADE})`);
         return;
       }
       if (requiredCapital > availableMargin) {
         console.log(`⚠️ Insufficient margin. Required: ${requiredCapital}, Available: ${availableMargin}. Skipping.`);
+        await logWebhookOrder(data, "skipped", `insufficient margin (req: ${requiredCapital}, avail: ${availableMargin})`);
         return;
       }
     }
@@ -606,8 +643,11 @@ app.post("/webhook/tradingview", async (req, res) => {
     );
 
     console.log("✅ Order Placed:", orderResponse.data);
+    await logWebhookOrder(data, "success", null, orderResponse.data.data.order_id);
   } catch (error) {
     console.error("Webhook Error:", error.response?.data || error.message);
+    const errorMsg = error.response?.data?.errors?.[0]?.message || error.message;
+    await logWebhookOrder(req.body, "failed", errorMsg);
   }
 });
 
@@ -684,9 +724,10 @@ app.get("/auth/callback", async (req, res) => {
 });
 
 // ===============================
-// Schedule Token Refresh (Every 20 hours)
+// Schedule Cron Jobs
 // ===============================
-function scheduleTokenRefresh() {
+function scheduleCronJobs() {
+  // 1. Token Refresh (Every 20 hours)
   cron.schedule("0 */20 * * *", async () => {
     console.log("🔄 Cron: Checking token refresh...");
     if (upstoxRefreshToken) {
@@ -700,6 +741,25 @@ function scheduleTokenRefresh() {
       console.log("⚠️ Cron: No refresh token stored. Need to login first.");
     }
   });
+
+  // 2. Log Deletion (Every day at midnight)
+  cron.schedule("0 0 * * *", async () => {
+    try {
+      console.log("🧹 Cron: Running log cleanup (30 days expiry)...");
+      const expiryDate = new Date();
+      expiryDate.setDate(expiryDate.getDate() - 30);
+      
+      const { data, error, count } = await supabase
+        .from("tradingview_logs")
+        .delete({ count: 'exact' })
+        .lt("created_at", expiryDate.toISOString());
+
+      if (error) throw error;
+      console.log(`✅ Cron: Deleted ${count || 0} old logs.`);
+    } catch (err) {
+      console.error("❌ Cron: Log cleanup failed:", err.message);
+    }
+  });
 }
 
 // ===============================
@@ -709,5 +769,5 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   await syncInstruments(); // Download & Parse fresh instruments from Upstox
   await loadTokensFromDB(); // Try loading tokens from Supabase at startup
-  scheduleTokenRefresh(); // Start cron job
+  scheduleCronJobs(); // Start cron jobs
 });
