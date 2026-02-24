@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const fs = require("fs");
+const path = require("path");
 const cron = require("node-cron");
 const { createClient } = require("@supabase/supabase-js");
 const csv = require("csv-parser");
@@ -18,7 +19,12 @@ const PORT = process.env.PORT || 5000;
 // ===============================
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error("❌ ERROR: SUPABASE_URL or SUPABASE_KEY is missing in environment variables!");
+}
+
+const supabase = createClient(supabaseUrl || "https://placeholder.supabase.co", supabaseKey || "placeholder");
 
 // ===============================
 // Store Upstox Tokens (Memory + DB)
@@ -32,13 +38,16 @@ async function saveTokensToDB(accessToken, refreshToken) {
   try {
     console.log("💾 Saving tokens to Supabase...");
     
-    // 1. Delete old tokens (as requested: remove old non useable token from db)
+    // 1. Delete old tokens
     const { error: deleteError } = await supabase
       .from("auth_tokens")
       .delete()
-      .neq("access_token", "dummy"); // Delete all
+      .neq("access_token", "dummy");
 
-    if (deleteError) throw deleteError;
+    if (deleteError) {
+      console.error("❌ Supabase Delete Error:", deleteError);
+      throw deleteError;
+    }
 
     // 2. Insert new tokens
     const { error: insertError } = await supabase
@@ -51,11 +60,14 @@ async function saveTokensToDB(accessToken, refreshToken) {
         }
       ]);
 
-    if (insertError) throw insertError;
+    if (insertError) {
+      console.error("❌ Supabase Insert Error:", insertError);
+      throw insertError;
+    }
 
     console.log("✅ Tokens saved to Supabase successfully");
   } catch (error) {
-    console.error("❌ Supabase Save Error:", error.message);
+    console.error("❌ Supabase Save Error:", error.message || error);
   }
 }
 
@@ -69,14 +81,14 @@ async function loadTokensFromDB() {
       .order("updated_at", { ascending: false })
       .limit(1);
 
-    if (error) throw error;
+    if (error) {
+      console.error("❌ Supabase Load Error:", error);
+      throw error;
+    }
 
     if (data && data.length > 0) {
       upstoxAccessToken = data[0].access_token;
       upstoxRefreshToken = data[0].refresh_token;
-      // We don't store expiry in DB currently, but Upstox tokens usually last 24h.
-      // We'll set it to 23 hours from now if we just loaded it, 
-      // or we could just rely on the next refresh cycle.
       tokenExpiryTime = Date.now() + 23 * 60 * 60 * 1000; 
       console.log("✅ Tokens loaded from Supabase");
       return true;
@@ -85,7 +97,7 @@ async function loadTokensFromDB() {
       return false;
     }
   } catch (error) {
-    console.error("❌ Supabase Load Error:", error.message);
+    console.error("❌ Supabase Load Error Summary:", error.message || error);
     return false;
   }
 }
@@ -108,13 +120,14 @@ let instrumentMap = {};
 // Load/Sync Instrument Master
 // ===============================
 async function syncInstruments() {
-  const segments = ["NSE", "NFO", "MCX", "CDS"];
+  const segments = ["NSE", "NFO", "BSE", "MCX"];
   console.log("📥 Starting instrument sync for:", segments.join(", "));
 
   for (const segment of segments) {
     try {
-      const url = `https://api.upstox.com/v2/instruments/short_name/${segment}.csv.gz`;
-      console.log(`🌐 Fetching ${segment} instruments...`);
+      // Use JSON format as CSV is deprecated and returning 403/404
+      const url = `https://assets.upstox.com/market-quote/instruments/exchange/${segment}.json.gz`;
+      console.log(`🌐 Fetching ${segment} instruments (JSON)...`);
 
       const response = await axios({
         method: "get",
@@ -123,23 +136,49 @@ async function syncInstruments() {
       });
 
       const gunzip = zlib.createGunzip();
-      const parser = csv();
+      let rawData = "";
 
-      response.data.pipe(gunzip).pipe(parser);
+      response.data.pipe(gunzip);
 
-      parser.on("data", (row) => {
-        // Upstox CSV columns: instrument_key, exchange_token, trading_symbol, etc.
-        const symbol = row.trading_symbol;
-        const key = row.instrument_key;
-        if (symbol && key) {
-          instrumentMap[symbol] = key;
+      gunzip.on("data", (chunk) => {
+        rawData += chunk.toString();
+      });
+
+      await new Promise((resolve, reject) => {
+        gunzip.on("end", () => resolve());
+        gunzip.on("error", (err) => reject(err));
+      });
+
+      const instruments = JSON.parse(rawData);
+      console.log(`📊 Processing ${instruments.length} instruments for ${segment}...`);
+
+      instruments.forEach((inst) => {
+        const symbol = inst.trading_symbol;
+        if (symbol) {
+          instrumentMap[symbol] = inst;
         }
       });
 
-      await finished(parser);
       console.log(`✅ ${segment} sync completed.`);
     } catch (error) {
       console.error(`❌ Error syncing ${segment}:`, error.message);
+      
+      // Fallback: Check if we have local file
+      const localPath = path.join(__dirname, "instruments", `${segment}.json`);
+      if (fs.existsSync(localPath)) {
+        console.log(`📦 Loading ${segment} from local fallback: ${localPath}`);
+        try {
+          const content = fs.readFileSync(localPath, "utf8");
+          const instruments = JSON.parse(content);
+          instruments.forEach((inst) => {
+            const symbol = inst.trading_symbol;
+            if (symbol) instrumentMap[symbol] = inst;
+          });
+          console.log(`✅ ${segment} loaded from local fallback.`);
+        } catch (localErr) {
+          console.error(`❌ Local fallback failed for ${segment}:`, localErr.message);
+        }
+      }
     }
   }
 
@@ -156,14 +195,14 @@ function getInstrumentToken(symbol) {
   const parts = symbol.split(":");
   const tradingSymbol = parts.length > 1 ? parts[1] : parts[0];
 
-  const token = instrumentMap[tradingSymbol];
+  const instrument = instrumentMap[tradingSymbol];
 
-  if (!token) {
+  if (!instrument) {
     console.log("❌ Instrument Not Found in Map:", tradingSymbol);
     return null;
   }
 
-  return token;
+  return instrument.instrument_key;
 }
 
 // ===============================
@@ -268,6 +307,25 @@ async function ensureValidAccessToken() {
 
   return true;
 }
+
+// ===============================
+// Search Instruments
+// ===============================
+app.get("/api/search", (req, res) => {
+  const query = req.query.q?.toUpperCase();
+  if (!query || query.length < 2) {
+    return res.json([]);
+  }
+
+  const results = Object.values(instrumentMap)
+    .filter((inst) => 
+      inst.trading_symbol?.toUpperCase().includes(query) || 
+      inst.name?.toUpperCase().includes(query)
+    )
+    .slice(0, 50); // Limit results
+
+  res.json(results);
+});
 
 // ===============================
 // Health Route
@@ -447,7 +505,12 @@ app.post("/webhook/tradingview", async (req, res) => {
 // ===============================
 app.get("/auth/login", (req, res) => {
   const returnUrl = req.query.return_url || "http://localhost:3000";
-  const redirectUri = "https://shiv-websocket.onrender.com/auth/callback";
+  const redirectUri = process.env.UPSTOX_REDIRECT_URI || "https://shiv-websocket.onrender.com/auth/callback";
+  
+  console.log("🔗 Auth Login Initiated");
+  console.log("📍 Redirect URI:", redirectUri);
+  console.log("↩️ Return URL:", returnUrl);
+
   const authUrl = `https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=${process.env.UPSTOX_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(returnUrl)}`;
   res.redirect(authUrl);
 });
@@ -459,8 +522,17 @@ app.get("/auth/callback", async (req, res) => {
   try {
     const code = req.query.code;
     const returnUrl = req.query.state || "http://localhost:3000";
-    const redirectUri = "https://shiv-websocket.onrender.com/auth/callback";
+    const redirectUri = process.env.UPSTOX_REDIRECT_URI || "https://shiv-websocket.onrender.com/auth/callback";
 
+    console.log("📩 Auth Callback Received");
+    console.log("🔑 Auth Code:", code ? "YES" : "NO");
+
+    if (!code) {
+      console.error("❌ No auth code received in callback");
+      return res.status(400).send("No auth code received");
+    }
+
+    console.log("🔄 Exchanging code for token...");
     const response = await axios.post(
       "https://api.upstox.com/v2/login/authorization/token",
       new URLSearchParams({
@@ -477,11 +549,17 @@ app.get("/auth/callback", async (req, res) => {
       }
     );
 
+    console.log("✅ Token Exchange Successful");
+    
+    if (!response.data.access_token) {
+      console.error("❌ Access token missing in Upstox response:", response.data);
+      return res.status(500).send("Failed to obtain access token");
+    }
+
     upstoxAccessToken = response.data.access_token;
     upstoxRefreshToken = response.data.refresh_token;
     tokenExpiryTime = Date.now() + 23 * 60 * 60 * 1000;
 
-    console.log("✅ Access Token Stored");
     console.log("⏳ Token Expiry Set to 23 hours from now");
 
     // Persist to Supabase
@@ -489,8 +567,8 @@ app.get("/auth/callback", async (req, res) => {
 
     res.redirect(`${returnUrl}?token=${encodeURIComponent(upstoxAccessToken)}`);
   } catch (error) {
-    console.error("Auth Error:", error.response?.data || error.message);
-    res.status(500).send("Auth Failed");
+    console.error("❌ Auth Error:", error.response?.data || error.message);
+    res.status(500).send(`Auth Failed: ${JSON.stringify(error.response?.data || error.message)}`);
   }
 });
 
