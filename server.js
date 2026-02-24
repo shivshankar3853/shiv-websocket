@@ -399,9 +399,13 @@ app.get("/health", (req, res) => {
 // ===============================
 // Render Service Control
 // ===============================
-const RENDER_API_KEY = process.env.RENDER_API_KEY || "rnd_uq7DTg3YkAw9jVq2ta9BVNzWDHEx";
-const SERVICE_ID = process.env.SERVICE_ID || "srv-d6dgj1a4d50c73apk16g";
-const FRONTEND_SERVICE_ID = process.env.FRONTEND_SERVICE_ID || "srv-d6eppbjh46gs73e89nk0";
+const RENDER_API_KEY = process.env.RENDER_API_KEY;
+const SERVICE_ID = process.env.SERVICE_ID;
+const FRONTEND_SERVICE_ID = process.env.FRONTEND_SERVICE_ID;
+
+if (!RENDER_API_KEY || !SERVICE_ID || !FRONTEND_SERVICE_ID) {
+  console.warn("⚠️ WARNING: RENDER_API_KEY, SERVICE_ID, or FRONTEND_SERVICE_ID is missing!");
+}
 
 app.post("/service/restart", async (req, res) => {
   try {
