@@ -120,7 +120,7 @@ let instrumentMap = {};
 // Load/Sync Instrument Master
 // ===============================
 async function syncInstruments() {
-  const segments = ["NSE", "NFO", "BSE", "MCX"];
+  const segments = ["NSE", "BSE", "MCX"];
   console.log("📥 Starting instrument sync for:", segments.join(", "));
 
   for (const segment of segments) {
@@ -313,15 +313,33 @@ async function ensureValidAccessToken() {
 // ===============================
 app.get("/api/search", (req, res) => {
   const query = req.query.q?.toUpperCase();
+  const type = req.query.type?.toUpperCase(); // EQUITY, FUTURE, OPTION
+  
   if (!query || query.length < 2) {
     return res.json([]);
   }
 
   const results = Object.values(instrumentMap)
-    .filter((inst) => 
-      inst.trading_symbol?.toUpperCase().includes(query) || 
-      inst.name?.toUpperCase().includes(query)
-    )
+    .filter((inst) => {
+      const matchesQuery = inst.trading_symbol?.toUpperCase().includes(query) || 
+                          inst.name?.toUpperCase().includes(query);
+      
+      if (!matchesQuery) return false;
+      
+      if (type) {
+        if (type === 'EQUITY') {
+          return inst.instrument_type === 'EQUITY';
+        }
+        if (type === 'FUTURE') {
+          return inst.instrument_type === 'FUTSTK' || inst.instrument_type === 'FUTIDX' || inst.instrument_type === 'FUTCUR' || inst.instrument_type === 'FUTCOM';
+        }
+        if (type === 'OPTION') {
+          return inst.instrument_type === 'OPTSTK' || inst.instrument_type === 'OPTIDX' || inst.instrument_type === 'OPTCUR' || inst.instrument_type === 'OPTCOM';
+        }
+      }
+      
+      return true;
+    })
     .slice(0, 50); // Limit results
 
   res.json(results);
