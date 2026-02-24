@@ -529,6 +529,22 @@ app.post("/api/change-pin", async (req, res) => {
   }
 });
 
+app.get("/api/logs", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("tradingview_logs")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(100);
+
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error("❌ Fetch Logs Error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Helper: Log Webhook Order to Supabase
 async function logWebhookOrder(data, status, reason = null, orderId = null) {
   try {
@@ -655,11 +671,21 @@ app.post("/webhook/tradingview", async (req, res) => {
       }
     }
 
+    // Determine Product Type
+    let productType = data.product || "D"; // Default to Delivery
+    
+    // Auto-correct for Futures/Options/Commodities (MCX, NFO, CDS)
+    if (data.symbol.startsWith("MCX:") || data.symbol.startsWith("NFO:") || data.symbol.startsWith("CDS:")) {
+      if (productType === "D" || productType === "DELIVERY") {
+        productType = "NRML";
+      }
+    }
+
     const orderResponse = await axios.post(
       "https://api.upstox.com/v2/order/place",
       {
         quantity: data.quantity,
-        product: "I",
+        product: productType,
         validity: "DAY",
         price: 0,
         tag: "tv-order",
