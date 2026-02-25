@@ -119,6 +119,39 @@ const recentSignals = new Map();
 let instrumentMap = {}; // Keyed by instrument_key for search
 let symbolToInstrumentMap = {}; // Keyed by trading_symbol for fast lookup
 
+// Segment-specific arrays for faster searching
+let equityList = [];
+let futureList = [];
+let optionList = [];
+
+// Inverted Index for ultra-fast searching
+// Maps a 3-character prefix to an array of instruments
+let searchIndex = {
+  EQUITY: {},
+  FUTURE: {},
+  OPTION: {},
+  ALL: {}
+};
+
+// Helper to build the inverted index
+function addToSearchIndex(segment, text, inst) {
+  if (!text || text.length < 2) return;
+  const normalized = text.toUpperCase();
+  const tokens = normalized.split(/[^A-Z0-9]/).filter(t => t.length >= 2);
+  
+  tokens.forEach(token => {
+    // Index the first 2 and 3 characters for fast prefix matching
+    const prefixes = [token.substring(0, 2), token.substring(0, 3)];
+    prefixes.forEach(prefix => {
+      if (!searchIndex[segment][prefix]) searchIndex[segment][prefix] = new Set();
+      searchIndex[segment][prefix].add(inst);
+      
+      if (!searchIndex.ALL[prefix]) searchIndex.ALL[prefix] = new Set();
+      searchIndex.ALL[prefix].add(inst);
+    });
+  });
+}
+
 // ===============================
 // Load/Sync Instrument Master
 // ===============================
@@ -126,8 +159,19 @@ async function syncInstruments() {
   const segments = ["NSE", "BSE", "MCX"];
   console.log("📥 Starting instrument sync for:", segments.join(", "));
 
+  // Clear existing maps/lists/index
+  instrumentMap = {};
+  symbolToInstrumentMap = {};
+  equityList = [];
+  futureList = [];
+  optionList = [];
+  searchIndex = { EQUITY: {}, FUTURE: {}, OPTION: {}, ALL: {} };
+
   for (const segment of segments) {
     try {
+      // Add a small delay between segments to avoid 403 Forbidden
+      await new Promise(r => setTimeout(r, 2000));
+
       // Use JSON format as CSV is deprecated and returning 403/404
       const url = `https://assets.upstox.com/market-quote/instruments/exchange/${segment}.json.gz`;
       console.log(`🌐 Fetching ${segment} instruments (JSON)...`);
@@ -136,6 +180,13 @@ async function syncInstruments() {
         method: "get",
         url: url,
         responseType: "stream",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+          "Accept": "*/*",
+          "Accept-Encoding": "gzip, deflate, br",
+          "Referer": "https://upstox.com/",
+          "Origin": "https://upstox.com"
+        }
       });
 
       const gunzip = zlib.createGunzip();
@@ -158,9 +209,32 @@ async function syncInstruments() {
       instruments.forEach((inst) => {
         const key = inst.instrument_key;
         const symbol = inst.trading_symbol;
+        const name = inst.name || "";
+        const type = inst.instrument_type?.toUpperCase() || "";
+
         if (key) {
           instrumentMap[key] = inst;
+          
+          let targetSegment = null;
+          // Pre-filter into segment lists
+          if (type.startsWith('EQ')) {
+            equityList.push(inst);
+            targetSegment = 'EQUITY';
+          } else if (type.includes('FUT')) {
+            futureList.push(inst);
+            targetSegment = 'FUTURE';
+          } else if (type.includes('OPT')) {
+            optionList.push(inst);
+            targetSegment = 'OPTION';
+          }
+
+          // Build Index
+          if (targetSegment) {
+            addToSearchIndex(targetSegment, symbol, inst);
+            if (name) addToSearchIndex(targetSegment, name, inst);
+          }
         }
+        
         if (symbol) {
           // If multiple segments have the same symbol (e.g., NSE/BSE), prioritize NSE
           if (!symbolToInstrumentMap[symbol] || inst.exchange === "NSE") {
@@ -183,7 +257,32 @@ async function syncInstruments() {
           instruments.forEach((inst) => {
             const key = inst.instrument_key;
             const symbol = inst.trading_symbol;
-            if (key) instrumentMap[key] = inst;
+            const name = inst.name || "";
+            const type = inst.instrument_type?.toUpperCase() || "";
+
+            if (key) {
+              instrumentMap[key] = inst;
+              
+              let targetSegment = null;
+              // Pre-filter into segment lists
+              if (type.startsWith('EQ')) {
+                equityList.push(inst);
+                targetSegment = 'EQUITY';
+              } else if (type.includes('FUT')) {
+                futureList.push(inst);
+                targetSegment = 'FUTURE';
+              } else if (type.includes('OPT')) {
+                optionList.push(inst);
+                targetSegment = 'OPTION';
+              }
+
+              // Build Index
+              if (targetSegment) {
+                addToSearchIndex(targetSegment, symbol, inst);
+                if (name) addToSearchIndex(targetSegment, name, inst);
+              }
+            }
+
             if (symbol) {
               if (!symbolToInstrumentMap[symbol] || inst.exchange === "NSE") {
                 symbolToInstrumentMap[symbol] = inst;
@@ -199,7 +298,7 @@ async function syncInstruments() {
   }
 
   console.log(
-    `✨ Total Instruments in Map: ${Object.keys(instrumentMap).length}`
+    `✨ Total Instruments: ${Object.keys(instrumentMap).length} (EQ: ${equityList.length}, FUT: ${futureList.length}, OPT: ${optionList.length})`
   );
 }
 
@@ -328,37 +427,55 @@ async function ensureValidAccessToken() {
 // Search Instruments
 // ===============================
 app.get("/api/search", (req, res) => {
-  const query = req.query.q?.toUpperCase();
-  const type = req.query.type?.toUpperCase(); // EQUITY, FUTURE, OPTION
+  const query = req.query.q?.toUpperCase() || "";
+  const type = req.query.type?.toUpperCase() || "ALL"; // EQUITY, FUTURE, OPTION
   
-  if (!query || query.length < 2) {
+  // If no query and no type, return empty
+  if (!query && type === "ALL") {
     return res.json([]);
   }
 
-  const results = Object.values(instrumentMap)
+  // If query is provided, it must be at least 2 chars unless a type is selected
+  if (query && query.length < 2 && type === "ALL") {
+    return res.json([]);
+  }
+
+  let sourceList = [];
+  
+  // Try ultra-fast index lookup first
+  if (query.length >= 2) {
+    const prefix3 = query.substring(0, 3);
+    const prefix2 = query.substring(0, 2);
+    const indexedSet = searchIndex[type]?.[prefix3] || searchIndex[type]?.[prefix2];
+    
+    if (indexedSet) {
+      sourceList = Array.from(indexedSet);
+    } else {
+      // If not in index, it's possible it's a mid-word match that wasn't tokenized
+      // Fallback to full segment scan
+      if (type === 'EQUITY') sourceList = equityList;
+      else if (type === 'FUTURE') sourceList = futureList;
+      else if (type === 'OPTION') sourceList = optionList;
+      else sourceList = Object.values(instrumentMap);
+    }
+  } else {
+    // No query or 1-char query, show top items from segment
+    if (type === 'EQUITY') sourceList = equityList;
+    else if (type === 'FUTURE') sourceList = futureList;
+    else if (type === 'OPTION') sourceList = optionList;
+    else sourceList = Object.values(instrumentMap);
+  }
+
+  const results = sourceList
     .filter((inst) => {
+      if (!query) return true;
       const tradingSymbol = inst.trading_symbol?.toUpperCase() || "";
       const name = inst.name?.toUpperCase() || "";
-      const matchesQuery = tradingSymbol.includes(query) || name.includes(query);
-      
-      if (!matchesQuery) return false;
-      
-      if (type) {
-        const instType = inst.instrument_type?.toUpperCase() || "";
-        if (type === 'EQUITY') {
-          return instType === 'EQUITY';
-        }
-        if (type === 'FUTURE') {
-          return instType.startsWith('FUT');
-        }
-        if (type === 'OPTION') {
-          return instType.startsWith('OPT');
-        }
-      }
-      
-      return true;
+      return tradingSymbol.includes(query) || name.includes(query);
     })
     .sort((a, b) => {
+      if (!query) return 0;
+      
       const aSymbol = a.trading_symbol?.toUpperCase() || "";
       const bSymbol = b.trading_symbol?.toUpperCase() || "";
       
