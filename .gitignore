@@ -9,6 +9,7 @@ yarn.lock
 .env.*.local
 
 frontend/
+instruments/
 
 # Logs
 logs/

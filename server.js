@@ -9,6 +9,7 @@ const { createClient } = require("@supabase/supabase-js");
 const csv = require("csv-parser");
 const zlib = require("zlib");
 const { finished } = require("stream/promises");
+const syncInstrumentsTask = require("./syncInstruments");
 
 const app = express();
 app.use(cors());
@@ -114,210 +115,35 @@ const DUPLICATE_SIGNAL_WINDOW = 60000; // 1 minute in ms
 const recentSignals = new Map();
 
 // ===============================
-// Instrument Map (Symbol → Token)
+// Risk Management & Settings
 // ===============================
-let instrumentMap = {}; // Keyed by instrument_key for search
-let symbolToInstrumentMap = {}; // Keyed by trading_symbol for fast lookup
-
-// Segment-specific arrays for faster searching
-let equityList = [];
-let futureList = [];
-let optionList = [];
-
-// Inverted Index for ultra-fast searching
-// Maps a 3-character prefix to an array of instruments
-let searchIndex = {
-  EQUITY: {},
-  FUTURE: {},
-  OPTION: {},
-  ALL: {}
-};
-
-// Helper to build the inverted index
-function addToSearchIndex(segment, text, inst) {
-  if (!text || text.length < 2) return;
-  const normalized = text.toUpperCase();
-  const tokens = normalized.split(/[^A-Z0-9]/).filter(t => t.length >= 2);
-  
-  tokens.forEach(token => {
-    // Index the first 2 and 3 characters for fast prefix matching
-    const prefixes = [token.substring(0, 2), token.substring(0, 3)];
-    prefixes.forEach(prefix => {
-      if (!searchIndex[segment][prefix]) searchIndex[segment][prefix] = new Set();
-      searchIndex[segment][prefix].add(inst);
-      
-      if (!searchIndex.ALL[prefix]) searchIndex.ALL[prefix] = new Set();
-      searchIndex.ALL[prefix].add(inst);
-    });
-  });
-}
 
 // ===============================
-// Load/Sync Instrument Master
+// Helper: Get Instrument Token (Supabase)
 // ===============================
-async function syncInstruments() {
-  const segments = ["NSE", "BSE", "MCX"];
-  console.log("📥 Starting instrument sync for:", segments.join(", "));
-
-  // Clear existing maps/lists/index
-  instrumentMap = {};
-  symbolToInstrumentMap = {};
-  equityList = [];
-  futureList = [];
-  optionList = [];
-  searchIndex = { EQUITY: {}, FUTURE: {}, OPTION: {}, ALL: {} };
-
-  for (const segment of segments) {
-    try {
-      // Add a small delay between segments to avoid 403 Forbidden
-      await new Promise(r => setTimeout(r, 2000));
-
-      // Use JSON format as CSV is deprecated and returning 403/404
-      const url = `https://assets.upstox.com/market-quote/instruments/exchange/${segment}.json.gz`;
-      console.log(`🌐 Fetching ${segment} instruments (JSON)...`);
-
-      const response = await axios({
-        method: "get",
-        url: url,
-        responseType: "stream",
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-          "Accept": "*/*",
-          "Accept-Encoding": "gzip, deflate, br",
-          "Referer": "https://upstox.com/",
-          "Origin": "https://upstox.com"
-        }
-      });
-
-      const gunzip = zlib.createGunzip();
-      let rawData = "";
-
-      response.data.pipe(gunzip);
-
-      gunzip.on("data", (chunk) => {
-        rawData += chunk.toString();
-      });
-
-      await new Promise((resolve, reject) => {
-        gunzip.on("end", () => resolve());
-        gunzip.on("error", (err) => reject(err));
-      });
-
-      const instruments = JSON.parse(rawData);
-      console.log(`📊 Processing ${instruments.length} instruments for ${segment}...`);
-
-      instruments.forEach((inst) => {
-        const key = inst.instrument_key;
-        const symbol = inst.trading_symbol;
-        const name = inst.name || "";
-        const type = inst.instrument_type?.toUpperCase() || "";
-
-        if (key) {
-          instrumentMap[key] = inst;
-          
-          let targetSegment = null;
-          // Pre-filter into segment lists
-          if (type.startsWith('EQ')) {
-            equityList.push(inst);
-            targetSegment = 'EQUITY';
-          } else if (type.includes('FUT')) {
-            futureList.push(inst);
-            targetSegment = 'FUTURE';
-          } else if (type.includes('OPT')) {
-            optionList.push(inst);
-            targetSegment = 'OPTION';
-          }
-
-          // Build Index
-          if (targetSegment) {
-            addToSearchIndex(targetSegment, symbol, inst);
-            if (name) addToSearchIndex(targetSegment, name, inst);
-          }
-        }
-        
-        if (symbol) {
-          // If multiple segments have the same symbol (e.g., NSE/BSE), prioritize NSE
-          if (!symbolToInstrumentMap[symbol] || inst.exchange === "NSE") {
-            symbolToInstrumentMap[symbol] = inst;
-          }
-        }
-      });
-
-      console.log(`✅ ${segment} sync completed.`);
-    } catch (error) {
-      console.error(`❌ Error syncing ${segment}:`, error.message);
-      
-      // Fallback: Check if we have local file
-      const localPath = path.join(__dirname, "instruments", `${segment}.json`);
-      if (fs.existsSync(localPath)) {
-        console.log(`📦 Loading ${segment} from local fallback: ${localPath}`);
-        try {
-          const content = fs.readFileSync(localPath, "utf8");
-          const instruments = JSON.parse(content);
-          instruments.forEach((inst) => {
-            const key = inst.instrument_key;
-            const symbol = inst.trading_symbol;
-            const name = inst.name || "";
-            const type = inst.instrument_type?.toUpperCase() || "";
-
-            if (key) {
-              instrumentMap[key] = inst;
-              
-              let targetSegment = null;
-              // Pre-filter into segment lists
-              if (type.startsWith('EQ')) {
-                equityList.push(inst);
-                targetSegment = 'EQUITY';
-              } else if (type.includes('FUT')) {
-                futureList.push(inst);
-                targetSegment = 'FUTURE';
-              } else if (type.includes('OPT')) {
-                optionList.push(inst);
-                targetSegment = 'OPTION';
-              }
-
-              // Build Index
-              if (targetSegment) {
-                addToSearchIndex(targetSegment, symbol, inst);
-                if (name) addToSearchIndex(targetSegment, name, inst);
-              }
-            }
-
-            if (symbol) {
-              if (!symbolToInstrumentMap[symbol] || inst.exchange === "NSE") {
-                symbolToInstrumentMap[symbol] = inst;
-              }
-            }
-          });
-          console.log(`✅ ${segment} loaded from local fallback.`);
-        } catch (localErr) {
-          console.error(`❌ Local fallback failed for ${segment}:`, localErr.message);
-        }
-      }
-    }
-  }
-
-  console.log(
-    `✨ Total Instruments: ${Object.keys(instrumentMap).length} (EQ: ${equityList.length}, FUT: ${futureList.length}, OPT: ${optionList.length})`
-  );
-}
-
-// ===============================
-// Helper: Get Instrument Token
-// ===============================
-function getInstrumentToken(symbol) {
+async function getInstrumentToken(symbol) {
   // Input could be "NSE:SBIN" or "NFO:NIFTY23OCT19500CE"
   const parts = symbol.split(":");
   const tradingSymbol = parts.length > 1 ? parts[1] : parts[0];
 
-  const instrument = symbolToInstrumentMap[tradingSymbol];
+  try {
+    const { data, error } = await supabase
+      .from("instruments_upstoxmaster")
+      .select("instrument_key")
+      .eq("trading_symbol", tradingSymbol)
+      .limit(1)
+      .single();
 
-  if (!instrument) {
-    console.log("❌ Instrument Not Found in Map:", tradingSymbol);
+    if (error || !data) {
+      console.log("❌ Instrument Not Found in Supabase:", tradingSymbol);
+      return null;
+    }
+
+    return data.instrument_key;
+  } catch (err) {
+    console.error("❌ Error fetching instrument token:", err.message);
     return null;
   }
-
-  return instrument.instrument_key;
 }
 
 // ===============================
@@ -426,76 +252,68 @@ async function ensureValidAccessToken() {
 // ===============================
 // Search Instruments
 // ===============================
-app.get("/api/search", (req, res) => {
-  const query = req.query.q?.toUpperCase() || "";
+// API: Search Instruments (Supabase)
+// ===============================
+app.get("/api/search", async (req, res) => {
+  const query = req.query.q || "";
   const type = req.query.type?.toUpperCase() || "ALL"; // EQUITY, FUTURE, OPTION
-  
-  // If no query and no type, return empty
+
   if (!query && type === "ALL") {
     return res.json([]);
   }
 
-  // If query is provided, it must be at least 2 chars unless a type is selected
-  if (query && query.length < 2 && type === "ALL") {
-    return res.json([]);
-  }
+  try {
+    let supabaseQuery = supabase
+      .from("instruments_upstoxmaster")
+      .select("*")
+      .limit(50);
 
-  let sourceList = [];
-  
-  // Try ultra-fast index lookup first
-  if (query.length >= 2) {
-    const prefix3 = query.substring(0, 3);
-    const prefix2 = query.substring(0, 2);
-    const indexedSet = searchIndex[type]?.[prefix3] || searchIndex[type]?.[prefix2];
-    
-    if (indexedSet) {
-      sourceList = Array.from(indexedSet);
-    } else {
-      // If not in index, it's possible it's a mid-word match that wasn't tokenized
-      // Fallback to full segment scan
-      if (type === 'EQUITY') sourceList = equityList;
-      else if (type === 'FUTURE') sourceList = futureList;
-      else if (type === 'OPTION') sourceList = optionList;
-      else sourceList = Object.values(instrumentMap);
+    // Apply text search if query exists
+    if (query) {
+      supabaseQuery = supabaseQuery.or(`trading_symbol.ilike.%${query}%,name.ilike.%${query}%`);
     }
-  } else {
-    // No query or 1-char query, show top items from segment
-    if (type === 'EQUITY') sourceList = equityList;
-    else if (type === 'FUTURE') sourceList = futureList;
-    else if (type === 'OPTION') sourceList = optionList;
-    else sourceList = Object.values(instrumentMap);
+
+    // Apply type filtering
+    if (type !== "ALL") {
+      if (type === "EQUITY") {
+        supabaseQuery = supabaseQuery.or(`instrument_type.ilike.EQ%,instrument_type.eq.INDEX`);
+      } else if (type === "FUTURE") {
+        supabaseQuery = supabaseQuery.ilike("instrument_type", "%FUT%");
+      } else if (type === "OPTION") {
+        supabaseQuery = supabaseQuery.or(`instrument_type.ilike.%OPT%,instrument_type.eq.CE,instrument_type.eq.PE,segment.ilike.%FO%`);
+      }
+    }
+
+    const { data, error } = await supabaseQuery;
+
+    if (error) {
+      console.error("❌ Supabase Search Error:", error.message);
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.json(data || []);
+  } catch (err) {
+    console.error("❌ Search Exception:", err.message);
+    res.status(500).json({ error: "Internal search error" });
   }
+});
 
-  const results = sourceList
-    .filter((inst) => {
-      if (!query) return true;
-      const tradingSymbol = inst.trading_symbol?.toUpperCase() || "";
-      const name = inst.name?.toUpperCase() || "";
-      return tradingSymbol.includes(query) || name.includes(query);
-    })
-    .sort((a, b) => {
-      if (!query) return 0;
-      
-      const aSymbol = a.trading_symbol?.toUpperCase() || "";
-      const bSymbol = b.trading_symbol?.toUpperCase() || "";
-      
-      // 1. Exact matches first
-      if (aSymbol === query && bSymbol !== query) return -1;
-      if (bSymbol === query && aSymbol !== query) return 1;
-      
-      // 2. Starts with query first
-      if (aSymbol.startsWith(query) && !bSymbol.startsWith(query)) return -1;
-      if (bSymbol.startsWith(query) && !aSymbol.startsWith(query)) return 1;
-      
-      // 3. Equity first
-      if (a.instrument_type === 'EQUITY' && b.instrument_type !== 'EQUITY') return -1;
-      if (b.instrument_type === 'EQUITY' && a.instrument_type !== 'EQUITY') return 1;
-      
-      return 0;
-    })
-    .slice(0, 50);
-
-  res.json(results);
+// ===============================
+// API: Sync Instruments
+// ===============================
+app.get("/api/sync-instruments", async (req, res) => {
+  console.log("🚀 Sync requested via API");
+  try {
+    const result = await syncInstrumentsTask();
+    if (result.success) {
+      res.json({ message: "Sync successful", total: result.total });
+    } else {
+      res.status(500).json({ error: result.error });
+    }
+  } catch (err) {
+    console.error("❌ API Sync Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ===============================
@@ -764,7 +582,7 @@ app.post("/webhook/tradingview", async (req, res) => {
       return;
     }
 
-    const instrumentToken = getInstrumentToken(data.symbol);
+    const instrumentToken = await getInstrumentToken(data.symbol);
     if (!instrumentToken) {
       await logWebhookOrder(data, "failed", "instrument token not found");
       return;
@@ -978,7 +796,7 @@ function scheduleCronJobs() {
 // ===============================
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  await syncInstruments(); // Download & Parse fresh instruments from Upstox
+  // Instruments are now synced manually via UI to Supabase
   await loadTokensFromDB(); // Try loading tokens from Supabase at startup
   scheduleCronJobs(); // Start cron jobs
 });
