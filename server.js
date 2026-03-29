@@ -4,7 +4,6 @@ const cors = require("cors");
 const axios = require("axios");
 const cron = require("node-cron");
 const { createClient } = require("@supabase/supabase-js");
-const syncInstrumentsTask = require("./syncInstruments");
 
 const app = express();
 app.use(cors());
@@ -118,20 +117,26 @@ async function ensureValidAccessToken() {
 }
 
 // ===============================
-// Get Instrument Token
+// Normalize symbol for DB lookup
 // ===============================
-async function getInstrumentToken(symbol) {
-  // symbol example: NFO:NIFTY23JUN27000CE or NSE:SBIN
-  const parts = symbol.split(":");
-  const tradingSymbol = parts.length > 1 ? parts[1] : parts[0];
+function normalizeSymbol(tvSymbol) {
+  return tvSymbol.trim().replace(/\s+/g, " ");
+}
+
+// ===============================
+// Get Instrument from DB
+// ===============================
+async function getInstrument(tvSymbol) {
+  const normalized = normalizeSymbol(tvSymbol);
   try {
     const { data } = await supabase
       .from("instruments_upstoxmaster")
-      .select("instrument_key")
-      .eq("trading_symbol", tradingSymbol)
-      .limit(1)
+      .select("instrument_key, lot_size, segment, instrument_type")
+      .eq("trading_symbol", normalized)
       .single();
-    return data?.instrument_key || null;
+
+    if (!data) return null;
+    return data;
   } catch (err) {
     console.error("❌ Instrument fetch error:", err.message);
     return null;
@@ -188,6 +193,14 @@ async function logWebhookOrder(data, status, reason = null, orderId = null) {
 }
 
 // ===============================
+// Determine Product Type
+// ===============================
+function getProductType(segment) {
+  if (segment === "NSE_FO") return "MIS"; // Intraday F&O
+  return "D"; // Equity
+}
+
+// ===============================
 // TradingView Webhook
 // ===============================
 app.post("/webhook/tradingview", async (req, res) => {
@@ -211,14 +224,17 @@ app.post("/webhook/tradingview", async (req, res) => {
       return;
     }
 
-    const instrumentToken = await getInstrumentToken(data.symbol);
-    if (!instrumentToken) {
-      await logWebhookOrder(data, "failed", "instrument token not found");
+    const instrument = await getInstrument(data.symbol);
+    if (!instrument) {
+      await logWebhookOrder(data, "failed", "instrument not found");
       return;
     }
 
+    const finalQuantity = data.quantity * instrument.lot_size;
+    const productType = getProductType(instrument.segment);
+
     const positions = await getPositions();
-    const tradingSymbol = data.symbol.split(":")[1];
+    const tradingSymbol = data.symbol.split(":")[1] || data.symbol;
     const existing = positions.find(p => p.trading_symbol === tradingSymbol);
 
     // Position Checks
@@ -238,7 +254,7 @@ app.post("/webhook/tradingview", async (req, res) => {
       return;
     }
 
-    if (data.quantity > MAX_QUANTITY_PER_TRADE) {
+    if (finalQuantity > MAX_QUANTITY_PER_TRADE) {
       await logWebhookOrder(data, "skipped", "quantity exceeds max");
       return;
     }
@@ -250,7 +266,7 @@ app.post("/webhook/tradingview", async (req, res) => {
     }
 
     const price = data.price || 0;
-    const requiredCapital = price * data.quantity;
+    const requiredCapital = price * finalQuantity;
     if (requiredCapital > MAX_CAPITAL_PER_TRADE || requiredCapital > funds.equity.available_margin) {
       await logWebhookOrder(data, "skipped", "capital/margin exceeded");
       return;
@@ -260,12 +276,12 @@ app.post("/webhook/tradingview", async (req, res) => {
     const orderRes = await axios.post(
       "https://api.upstox.com/v2/order/place",
       {
-        quantity: data.quantity,
-        product: data.product,
+        quantity: finalQuantity,
+        product: productType,
         validity: "DAY",
         price: 0,
         tag: "tv-order",
-        instrument_token: instrumentToken,
+        instrument_token: instrument.instrument_key,
         order_type: "MARKET",
         transaction_type: data.action,
         disclosed_quantity: 0,
