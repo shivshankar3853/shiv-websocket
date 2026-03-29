@@ -278,24 +278,28 @@ app.post("/webhook/tradingview", async (req, res) => {
     // Max positions
     const active = positions.filter(p => parseInt(p.quantity) !== 0);
     if (active.length >= MAX_TOTAL_POSITIONS && !existing) {
+      console.log("⏭️ Max positions reached:", active.length);
       await logWebhookOrder(data, "skipped", "max positions reached");
       return;
     }
 
     if (finalQuantity > MAX_QUANTITY_PER_TRADE) {
+      console.log("⏭️ Quantity exceeds max:", finalQuantity);
       await logWebhookOrder(data, "skipped", "quantity exceeds max");
       return;
     }
 
     const funds = await getFunds();
     if (!funds) {
+      console.log("❌ Funds unavailable");
       await logWebhookOrder(data, "failed", "funds unavailable");
       return;
     }
 
     const price = data.price || 0;
     const requiredCapital = price * finalQuantity;
-    if (requiredCapital > MAX_CAPITAL_PER_TRADE || requiredCapital > funds.equity.available_margin) {
+    if (requiredCapital > MAX_CAPITAL_PER_TRADE || (funds.equity && requiredCapital > funds.equity.available_margin)) {
+      console.log(`⏭️ Capital/Margin check failed. Req: ${requiredCapital}, Max: ${MAX_CAPITAL_PER_TRADE}, Avail: ${funds.equity?.available_margin}`);
       await logWebhookOrder(data, "skipped", "capital/margin exceeded");
       return;
     }
