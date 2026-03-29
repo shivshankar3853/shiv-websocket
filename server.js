@@ -685,7 +685,7 @@ app.post("/webhook/tradingview", async (req, res) => {
 // ===============================
 app.get("/auth/login", (req, res) => {
   const returnUrl = req.query.return_url || "http://localhost:3000";
-  const redirectUri = process.env.UPSTOX_REDIRECT_URI || "https://shiv-websocket.onrender.com/auth/callback";
+  const redirectUri = process.env.UPSTOX_REDIRECT_URI || `${process.env.BACKEND_URL}/auth/callback`;
   
   console.log("🔗 Auth Login Initiated");
   console.log("📍 Redirect URI:", redirectUri);
@@ -702,7 +702,7 @@ app.get("/auth/callback", async (req, res) => {
   try {
     const code = req.query.code;
     const returnUrl = req.query.state || "http://localhost:3000";
-    const redirectUri = process.env.UPSTOX_REDIRECT_URI || "https://shiv-websocket.onrender.com/auth/callback";
+    const redirectUri = process.env.UPSTOX_REDIRECT_URI || `${process.env.BACKEND_URL}/auth/callback`;
 
     console.log("📩 Auth Callback Received");
     console.log("🔑 Auth Code:", code ? "YES" : "NO");
