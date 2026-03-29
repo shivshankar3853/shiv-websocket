@@ -235,7 +235,7 @@ app.post("/webhook/tradingview", async (req, res) => {
         .from("instruments_upstoxmaster")
         .select("instrument_key, lot_size, segment, instrument_type, trading_symbol")
         .eq("instrument_key", data.instrument_token)
-        .single();
+        .maybeSingle(); // Use maybeSingle to avoid coercion error if not found
       
       if (instError) console.error("❌ Supabase lookup error:", instError.message);
       instrument = instData;
