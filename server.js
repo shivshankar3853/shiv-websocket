@@ -196,8 +196,8 @@ async function logWebhookOrder(data, status, reason = null, orderId = null) {
 // Determine Product Type
 // ===============================
 function getProductType(segment) {
-  if (segment === "NSE_FO") return "MIS"; // Intraday F&O
-  return "D"; // Equity
+  if (segment === "NSE_FO") return "I"; // Intraday F&O is 'I' in Upstox V2
+  return "D"; // Equity or Carry Forward F&O
 }
 
 // ===============================
