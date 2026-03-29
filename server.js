@@ -220,8 +220,10 @@ app.post("/webhook/tradingview", async (req, res) => {
     }
 
     res.json({ status: "received" }); // immediate response
+    console.log("📥 Received signal for:", lookupValue);
 
     if (!(await ensureValidAccessToken())) {
+      console.error("❌ Access token invalid");
       await logWebhookOrder(data, "failed", "invalid access token");
       return;
     }
@@ -229,17 +231,20 @@ app.post("/webhook/tradingview", async (req, res) => {
     // Lookup instrument details (lot_size, segment, etc.)
     let instrument = null;
     if (data.instrument_token) {
-      const { data: instData } = await supabase
+      const { data: instData, error: instError } = await supabase
         .from("instruments_upstoxmaster")
         .select("instrument_key, lot_size, segment, instrument_type, trading_symbol")
         .eq("instrument_key", data.instrument_token)
         .single();
+      
+      if (instError) console.error("❌ Supabase lookup error:", instError.message);
       instrument = instData;
     } else {
       instrument = await getInstrument(data.symbol);
     }
 
     if (!instrument && !data.instrument_token) {
+      console.error("❌ Instrument not found for:", lookupValue);
       await logWebhookOrder(data, "failed", "instrument not found");
       return;
     }
@@ -250,6 +255,8 @@ app.post("/webhook/tradingview", async (req, res) => {
     const finalSegment = instrument?.segment || "NSE_EQ";
     const finalTradingSymbol = instrument?.trading_symbol || (data.symbol?.split(":")[1] || data.symbol);
 
+    console.log(`🔍 Instrument: ${finalTradingSymbol}, Token: ${finalInstrumentToken}, Lot Size: ${finalLotSize}`);
+
     const finalQuantity = data.quantity * finalLotSize;
     const productType = getProductType(finalSegment);
 
@@ -258,10 +265,12 @@ app.post("/webhook/tradingview", async (req, res) => {
 
     // Position Checks
     if (data.action === "BUY" && existing?.quantity > 0) {
+      console.log("⏭️ Already long, skipping");
       await logWebhookOrder(data, "skipped", "already long");
       return;
     }
     if (data.action === "SELL" && existing?.quantity < 0) {
+      console.log("⏭️ Already short, skipping");
       await logWebhookOrder(data, "skipped", "already short");
       return;
     }
@@ -292,6 +301,7 @@ app.post("/webhook/tradingview", async (req, res) => {
     }
 
     // Place Order
+    console.log("📤 Placing Upstox order with token:", finalInstrumentToken);
     const orderRes = await axios.post(
       "https://api.upstox.com/v2/order/place",
       {
@@ -310,6 +320,7 @@ app.post("/webhook/tradingview", async (req, res) => {
       { headers: { Authorization: `Bearer ${upstoxAccessToken}` } }
     );
 
+    console.log("✅ Upstox Response:", orderRes.data);
     await logWebhookOrder(data, "success", null, orderRes.data.data.order_id);
   } catch (err) {
     console.error("❌ Webhook Error:", err.response?.data || err.message);
