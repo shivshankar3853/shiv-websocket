@@ -176,7 +176,7 @@ async function getFunds() {
 async function logWebhookOrder(data, status, reason = null, orderId = null) {
   try {
     await supabase.from("tradingview_logs").insert([{
-      symbol: data.symbol,
+      symbol: data.symbol || data.instrument_token || "UNKNOWN",
       action: data.action,
       quantity: data.quantity,
       product: data.product,
@@ -209,10 +209,12 @@ app.post("/webhook/tradingview", async (req, res) => {
     if (!data.token || data.token !== process.env.WEBHOOK_SECRET)
       return res.status(401).json({ error: "Unauthorized" });
 
-    if (!data.symbol || !data.action || !data.product || !data.quantity)
+    // Allow either symbol or instrument_token
+    if ((!data.symbol && !data.instrument_token) || !data.action || !data.product || !data.quantity)
       return res.status(400).json({ error: "Invalid payload" });
 
-    if (isDuplicateSignal(data.symbol, data.action)) {
+    const lookupValue = data.instrument_token || data.symbol;
+    if (isDuplicateSignal(lookupValue, data.action)) {
       await logWebhookOrder(data, "skipped", "duplicate signal");
       return res.json({ status: "skipped", reason: "duplicate signal" });
     }
@@ -224,18 +226,35 @@ app.post("/webhook/tradingview", async (req, res) => {
       return;
     }
 
-    const instrument = await getInstrument(data.symbol);
-    if (!instrument) {
+    // Lookup instrument details (lot_size, segment, etc.)
+    let instrument = null;
+    if (data.instrument_token) {
+      const { data: instData } = await supabase
+        .from("instruments_upstoxmaster")
+        .select("instrument_key, lot_size, segment, instrument_type, trading_symbol")
+        .eq("instrument_key", data.instrument_token)
+        .single();
+      instrument = instData;
+    } else {
+      instrument = await getInstrument(data.symbol);
+    }
+
+    if (!instrument && !data.instrument_token) {
       await logWebhookOrder(data, "failed", "instrument not found");
       return;
     }
 
-    const finalQuantity = data.quantity * instrument.lot_size;
-    const productType = getProductType(instrument.segment);
+    // Use provided token or lookup token
+    const finalInstrumentToken = data.instrument_token || instrument.instrument_key;
+    const finalLotSize = instrument?.lot_size || 1;
+    const finalSegment = instrument?.segment || "NSE_EQ";
+    const finalTradingSymbol = instrument?.trading_symbol || (data.symbol?.split(":")[1] || data.symbol);
+
+    const finalQuantity = data.quantity * finalLotSize;
+    const productType = getProductType(finalSegment);
 
     const positions = await getPositions();
-    const tradingSymbol = data.symbol.split(":")[1] || data.symbol;
-    const existing = positions.find(p => p.trading_symbol === tradingSymbol);
+    const existing = positions.find(p => p.trading_symbol === finalTradingSymbol);
 
     // Position Checks
     if (data.action === "BUY" && existing?.quantity > 0) {
@@ -281,7 +300,7 @@ app.post("/webhook/tradingview", async (req, res) => {
         validity: "DAY",
         price: 0,
         tag: "tv-order",
-        instrument_token: instrument.instrument_key,
+        instrument_token: finalInstrumentToken,
         order_type: "MARKET",
         transaction_type: data.action,
         disclosed_quantity: 0,
