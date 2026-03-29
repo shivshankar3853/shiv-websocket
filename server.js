@@ -308,14 +308,14 @@ app.post("/webhook/tradingview", async (req, res) => {
         quantity: finalQuantity,
         product: productType,
         validity: "DAY",
-        price: 0,
+        price: data.price || 0,
         tag: "tv-order",
         instrument_token: finalInstrumentToken,
-        order_type: "MARKET",
+        order_type: data.order_type || "MARKET",
         transaction_type: data.action,
         disclosed_quantity: 0,
         trigger_price: 0,
-        is_amo: false
+        is_amo: data.is_amo || false
       },
       { headers: { Authorization: `Bearer ${upstoxAccessToken}` } }
     );
