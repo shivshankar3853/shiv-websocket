@@ -254,13 +254,14 @@ async function ensureValidAccessToken() {
 // ===============================
 // API: Search Instruments (Supabase)
 // ===============================
+// ===============================
+// Search Instruments (Supabase) - Fixed for FUTURE & OPTION
+// ===============================
 app.get("/api/search", async (req, res) => {
   const query = req.query.q || "";
   const type = req.query.type?.toUpperCase() || "ALL"; // EQUITY, FUTURE, OPTION
 
-  if (!query && type === "ALL") {
-    return res.json([]);
-  }
+  if (!query && type === "ALL") return res.json([]);
 
   try {
     let supabaseQuery = supabase
@@ -268,19 +269,28 @@ app.get("/api/search", async (req, res) => {
       .select("*")
       .limit(50);
 
-    // Apply text search if query exists
+    // Text search
     if (query) {
       supabaseQuery = supabaseQuery.or(`trading_symbol.ilike.%${query}%,name.ilike.%${query}%`);
     }
 
-    // Apply type filtering
+    // Type filter
     if (type !== "ALL") {
       if (type === "EQUITY") {
-        supabaseQuery = supabaseQuery.or(`instrument_type.ilike.EQ%,instrument_type.eq.INDEX`);
+        // NSE Cash or Index
+        supabaseQuery = supabaseQuery.or(
+          `instrument_type.eq.EQ,instrument_type.eq.INDEX`
+        );
       } else if (type === "FUTURE") {
-        supabaseQuery = supabaseQuery.ilike("instrument_type", "%FUT%");
+        // Futures: could be EQFUT, NFOFUT
+        supabaseQuery = supabaseQuery.or(
+          `instrument_type.ilike.%FUT%` // Covers all future types
+        );
       } else if (type === "OPTION") {
-        supabaseQuery = supabaseQuery.or(`instrument_type.ilike.%OPT%,instrument_type.eq.CE,instrument_type.eq.PE,segment.ilike.%FO%`);
+        // Options: CE/PE in FO/NFO segment
+        supabaseQuery = supabaseQuery.or(
+          `instrument_type.eq.CE,instrument_type.eq.PE,segment.ilike.%FO%`
+        );
       }
     }
 
@@ -297,7 +307,6 @@ app.get("/api/search", async (req, res) => {
     res.status(500).json({ error: "Internal search error" });
   }
 });
-
 // ===============================
 // API: Sync Instruments
 // ===============================
