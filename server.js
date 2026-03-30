@@ -509,6 +509,13 @@ app.get("/auth/callback", async (req, res) => {
   }
 });
 
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    time: new Date().toISOString()
+  });
+});
+
 // ===============================
 // Cron Jobs
 // ===============================
@@ -530,6 +537,8 @@ function scheduleCronJobs() {
     }
   });
 }
+
+
 
 // ===============================
 // Start Server
