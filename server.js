@@ -333,6 +333,143 @@ app.post("/webhook/tradingview", async (req, res) => {
 });
 
 // ===============================
+// API: Search Instruments
+// ===============================
+app.get("/api/search", async (req, res) => {
+  try {
+    const { q, segment } = req.query;
+    if (!q) return res.json([]);
+
+    let query = supabase
+      .from("instruments_upstoxmaster")
+      .select("trading_symbol, name, instrument_key, exchange, instrument_type, expiry, lot_size, segment")
+      .ilike("trading_symbol", `%${q}%`)
+      .limit(20);
+
+    if (segment && segment !== "ALL") {
+      query = query.eq("segment", segment);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error("❌ Search Error:", err.message);
+    res.status(500).json({ error: "Search failed" });
+  }
+});
+
+// ===============================
+// API: Get Unique Segments
+// ===============================
+app.get("/api/segments", async (req, res) => {
+  try {
+    // Hardcoded segments for performance with large dataset (162k+ rows)
+    const segments = [
+      "BSE_EQ", "BSE_FO", "MCX_FO", "NCD_FO", "NSE_COM", "NSE_EQ", "NSE_FO"
+    ];
+    res.json(segments);
+  } catch (err) {
+    console.error("❌ Segments Fetch Error:", err.message || err);
+    res.status(500).json({ error: "Failed to fetch segments", message: err.message });
+  }
+});
+
+// ===============================
+// API: Logs
+// ===============================
+app.get("/api/logs", async (req, res) => {
+  try {
+    const { limit = 50, startDate, endDate } = req.query;
+    let query = supabase
+      .from("tradingview_logs")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(parseInt(limit));
+
+    if (startDate) query = query.gte("created_at", startDate);
+    if (endDate) query = query.lte("created_at", endDate + "T23:59:59");
+
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error("❌ Fetch Logs Error:", err.message);
+    res.status(500).json({ error: "Failed to fetch logs" });
+  }
+});
+
+// ===============================
+// PIN Management (Temporary hardcoded)
+// ===============================
+let currentPIN = "123456"; 
+
+app.post("/api/verify-pin", (req, res) => {
+  const { pin } = req.body;
+  if (pin === currentPIN) {
+    res.json({ success: true });
+  } else {
+    res.status(401).json({ success: false, error: "Invalid PIN" });
+  }
+});
+
+app.post("/api/change-pin", (req, res) => {
+  const { currentPin, newPin } = req.body;
+  if (currentPin === currentPIN) {
+    currentPIN = newPin;
+    res.json({ success: true });
+  } else {
+    res.status(401).json({ success: false, error: "Incorrect current PIN" });
+  }
+});
+
+app.delete("/api/logs/:id", async (req, res) => {
+  try {
+    const { error } = await supabase.from("tradingview_logs").delete().eq("id", req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/logs", async (req, res) => {
+  try {
+    const { error } = await supabase.from("tradingview_logs").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===============================
+// API: Sync Instruments
+// ===============================
+const syncInstruments = require("./syncInstruments");
+app.get("/api/sync-instruments", async (req, res) => {
+  try {
+    const result = await syncInstruments();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===============================
+// Service Control
+// ===============================
+app.post("/service/restart", (req, res) => {
+  res.json({ status: "restarting" });
+  setTimeout(() => process.exit(0), 1000);
+});
+
+app.post("/service/stop", (req, res) => {
+  res.json({ status: "stopping" });
+  setTimeout(() => process.exit(0), 1000);
+});
+
+// ===============================
 // Upstox OAuth
 // ===============================
 app.get("/auth/login", (req, res) => {
